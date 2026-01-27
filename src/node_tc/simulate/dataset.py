@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, TypedDict, NotRequired
@@ -12,45 +13,38 @@ from torch.utils.data import Dataset
 @dataclass
 class SimulatedSample:
     """
-    一个用于存储模拟数据的类。
+    存储单个模拟个体的数据。
 
     Attributes:
-        true_cluster (int): 真实的簇标签。
-        static_vars (np.ndarray): 静态协变量。
-        t (np.ndarray): 时间序列。
-        obs (np.ndarray): 观测数据。
-        t_ (np.ndarray): 真实的时间序列。
-        obs_ (np.ndarray): 真实的潜在状态。
+        true_cluster: 真实簇标签
+        t: 观测时间点 (n_obs,)
+        obs: 观测值 (n_obs, D)
+        id: 个体ID（建议为 0..N-1 连续）
+        static_vars: 静态协变量 (d_s,) 或 None
+        t_: 真值时间点 (n_true,) 或 None
+        obs_: 真值潜在状态/无噪声轨迹 (n_true, Dz) 或 None
     """
-
     true_cluster: int
     t: np.ndarray
     obs: np.ndarray
     id: int
-    static_vars: np.ndarray | None
-    t_: np.ndarray
-    obs_: np.ndarray
+    static_vars: np.ndarray | None = None
+    t_: np.ndarray | None = None
+    obs_: np.ndarray | None = None
 
 
 @dataclass
 class SimulatedDataset:
-    """
-    一个用于存储多个模拟数据的类。
-
-    Attributes:
-        samples (List[SimulatedSample]): 存储多个模拟数据的列表。
-    """
-
     samples: list[SimulatedSample]
 
     def __post_init__(self):
-        self.true_k = np.array([p.true_cluster for p in self.samples])
-        self.num_clusters = len(set(self.true_k))
+        self.true_k = np.array([p.true_cluster for p in self.samples], dtype=int)
+        self.num_clusters = len(set(self.true_k.tolist()))
 
         self.n_static_vars = 0
         for sample in self.samples:
             if sample.static_vars is not None:
-                self.n_static_vars = sample.static_vars.shape[0]
+                self.n_static_vars = int(sample.static_vars.shape[0])
                 break
 
         if self.n_static_vars > 0:
@@ -58,20 +52,26 @@ class SimulatedDataset:
                 [
                     p.static_vars
                     if p.static_vars is not None
-                    else np.full((self.n_static_vars,), np.nan)
+                    else np.full((self.n_static_vars,), np.nan, dtype=float)
                     for p in self.samples
-                ]
+                ],
+                axis=0,
             )
 
     def __repr__(self) -> str:
-        return f"SimulatedDataset(num_patients={len(self.samples)}, num_clusters={self.num_clusters}, obs_dim={self.samples[0].obs.shape[1]}"
-
+        d = int(self.samples[0].obs.shape[1]) if len(self.samples) > 0 else -1
+        return (
+            f"SimulatedDataset(num_patients={len(self.samples)}, "
+            f"num_clusters={self.num_clusters}, obs_dim={d})"
+        )
 
     def to_csv(self, dir: str | Path) -> None:
         dir = Path(dir)
         dir.mkdir(exist_ok=True, parents=True)
 
-        indice = np.array([p.id for p in self.samples])
+        indice = np.array([p.id for p in self.samples], dtype=int)
+
+        # meta.csv
         df_meta = pd.DataFrame(self.true_k[:, None], index=indice, columns=["label"])
         if self.n_static_vars > 0:
             df_static_vars = pd.DataFrame(
@@ -82,57 +82,81 @@ class SimulatedDataset:
             df_meta = pd.concat([df_meta, df_static_vars], axis=1)
         df_meta.to_csv(dir / "meta.csv")
 
-        obs_arr, obs__arr = [], []
-        for sample in self.samples:
-            obs_arr.append(np.concatenate([sample.t[:, None], sample.obs], axis=1))
-            obs__arr.append(np.concatenate([sample.t_[:, None], sample.obs_], axis=1) )
-        obs_arr = np.concatenate(obs_arr)
-        obs__arr = np.concatenate(obs__arr)
+        # observations.csv
+        obs_arr = []
+        obs_index = []
+        obs_dim = int(self.samples[0].obs.shape[1])
+        for s in self.samples:
+            obs_arr.append(np.concatenate([s.t[:, None], s.obs], axis=1))
+            obs_index.extend([s.id] * len(s.t))
+        obs_arr = np.concatenate(obs_arr, axis=0)
+
         pd.DataFrame(
             obs_arr,
-            index=np.repeat(indice, [len(sample.t) for sample in self.samples]),
-            columns=["t"] + [f"x{i}" for i in range(sample.obs.shape[1])],
+            index=np.array(obs_index, dtype=int),
+            columns=["t"] + [f"x{i}" for i in range(obs_dim)],
         ).to_csv(dir / "observations.csv")
-        pd.DataFrame(
-            obs__arr,
-            index=np.repeat(indice, [len(sample.t_) for sample in self.samples]),
-            columns=["t"] + [f"z{i}" for i in range(sample.obs_.shape[1])],
-        ).to_csv(dir / "true_observations.csv")
+
+        # true_observations.csv（可选）
+        has_true = all((s.t_ is not None and s.obs_ is not None) for s in self.samples)
+        if has_true:
+            z_dim = int(self.samples[0].obs_.shape[1])  # type: ignore[union-attr]
+            true_arr = []
+            true_index = []
+            for s in self.samples:
+                t_ = s.t_  # type: ignore[assignment]
+                z_ = s.obs_  # type: ignore[assignment]
+                true_arr.append(np.concatenate([t_[:, None], z_], axis=1))
+                true_index.extend([s.id] * len(t_))
+            true_arr = np.concatenate(true_arr, axis=0)
+
+            pd.DataFrame(
+                true_arr,
+                index=np.array(true_index, dtype=int),
+                columns=["t"] + [f"z{i}" for i in range(z_dim)],
+            ).to_csv(dir / "true_observations.csv")
 
     @classmethod
-    def read_csv(cls, dir: str | Path) -> SimulatedDataset:
+    def read_csv(cls, dir: str | Path) -> "SimulatedDataset":
         dir = Path(dir)
-        meta_fn = dir / "meta.csv"
-        df_meta = pd.read_csv(meta_fn, index_col=0)
+        df_meta = pd.read_csv(dir / "meta.csv", index_col=0)
         df_obs = pd.read_csv(dir / "observations.csv", index_col=0)
-        df_obs_ = pd.read_csv(dir / "true_observations.csv", index_col=0)
-        samples = []
-        for ind, df_i in df_obs.groupby(lambda ind: ind):
-            assert isinstance(ind, int)
+
+        true_path = dir / "true_observations.csv"
+        df_obs_ = pd.read_csv(true_path, index_col=0) if true_path.exists() else None
+
+        samples: list[SimulatedSample] = []
+        for ind, df_i in df_obs.groupby(level=0):
+            # pandas index 可能是 np.int64
+            ind_int = int(ind)
 
             df_i = df_i.sort_values("t")
-            t_i = df_i["t"].to_numpy()
-            obs_i = df_i.filter(regex=r"^x\d+$").to_numpy()
+            t_i = df_i["t"].to_numpy(dtype=float)
+            obs_i = df_i.filter(regex=r"^x\d+$").to_numpy(dtype=float)
 
-            df_obs__i = df_obs_[df_obs_.index == ind].sort_values("t")
-            t__i = df_obs__i["t"].to_numpy()
-            obs__i = df_obs__i.filter(regex=r"^z\d+$").to_numpy()
+            if df_obs_ is not None:
+                df_obs__i = df_obs_.loc[[ind]].sort_values("t")  # 保留为 DataFrame
+                t__i = df_obs__i["t"].to_numpy(dtype=float)
+                obs__i = df_obs__i.filter(regex=r"^z\d+$").to_numpy(dtype=float)
+            else:
+                t__i, obs__i = None, None
 
-            df_meta_i = df_meta.loc[ind]
-            assert isinstance(df_meta_i, pd.Series)
-            if "static_0" in df_meta_i.index:
-                static_vars_i = df_meta_i.filter(regex=r"^static_\d+$").to_numpy()
+            df_meta_i = df_meta.loc[ind_int]
+            if isinstance(df_meta_i, pd.DataFrame):
+                df_meta_i = df_meta_i.iloc[0]
+
+            if any(col.startswith("static_") for col in df_meta_i.index):
+                static_vars_i = df_meta_i.filter(regex=r"^static_\d+$").to_numpy(dtype=float)
             else:
                 static_vars_i = None
 
-
             samples.append(
                 SimulatedSample(
+                    id=ind_int,
                     true_cluster=int(df_meta_i["label"]),
                     t=t_i,
                     obs=obs_i,
                     static_vars=static_vars_i,
-                    id=int(ind),
                     t_=t__i,
                     obs_=obs__i,
                 )
@@ -153,8 +177,7 @@ class SimulatedDatasetForTorch(Dataset):
     def __init__(
         self,
         samples: list[SimulatedSample] | SimulatedDataset,
-        transform: Callable[[SimuItem], SimuItem]
-        | None = None,
+        transform: Callable[[SimuItem], SimuItem] | None = None,
     ):
         if isinstance(samples, SimulatedDataset):
             samples = samples.samples
@@ -165,22 +188,16 @@ class SimulatedDatasetForTorch(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index: int) -> SimuItem:
-        sample = self.samples[index]
-
-        # NOTE: 先转换成float32。因为在同一个batch中，很多t可能非常接近，
-        # 后面有一个步骤是先对t取交集然后排序，需要保证做这一步时也是float32，
-        # 否则会出现问题（取交集时是不同的时间点，但是转换成float32进行训练
-        # 时就是一样的时间点了）
+        s = self.samples[index]
         res: SimuItem = {
-            "id": sample.id,
-            "t": torch.tensor(sample.t, dtype=torch.float32),
-            "x": torch.tensor(sample.obs, dtype=torch.float32),
-            "y": sample.true_cluster,
+            "id": int(s.id),
+            "t": torch.tensor(s.t, dtype=torch.float32),
+            "x": torch.tensor(s.obs, dtype=torch.float32),
+            "y": int(s.true_cluster),
         }
-        if sample.static_vars is not None:
-            res["z"] = torch.tensor(sample.static_vars, dtype=torch.float32)
+        if s.static_vars is not None:
+            res["z"] = torch.tensor(s.static_vars, dtype=torch.float32)
 
         if self.transform is not None:
             res = self.transform(res)
-
         return res

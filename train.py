@@ -4,88 +4,42 @@ from datetime import datetime
 import json
 
 from node_tc.simulate.dataset import SimulatedDataset, SimulatedDatasetForTorch
-from node_tc import NODETrajectoryCluster
+from node_tc.estimator import NODETrajectoryCluster  # ✅ 避免 node_tc/__init__.py 循环导入
 
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument(
-        "--save_dir",
-        type=str,
-        default="./results/example1/",
-        help="结果保存目录, 默认是./results/example1_{datetime.now().strftime('%Y%m%d_%H%M%S')}/",
-    )
-    parser.add_argument(
-        "--data_dir",
-        type=str,
-        default="./data/simulate/example1_20251128_194457/",
-        help="数据集目录, 默认是./data/simulate/example1_20251128_194457/",
-    )
-    parser.add_argument(
-        "--data_type",
-        type=str,
-        choices=["simulate", "real"],
-        default="simulate",
-        help="数据类型, 默认是simulate",
-    )
-    parser.add_argument(
-        "--num_clusters",
-        type=int,
-        default=3,
-        help="聚类数量, 默认是3",
-    )
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        default=0.001,
-        help="学习率, 默认是0.001",
-    )
-    parser.add_argument(
-        "--num_epochs",
-        type=int,
-        default=100,
-        help="训练轮数, 默认是100",
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=64,
-        help="批次大小, 默认是64",
-    )
-    parser.add_argument(
-        "--bn",
-        action="store_true",
-        help="是否使用批归一化, 默认是False",
-    )
-    parser.add_argument(
-        "--adjoint",
-        action="store_true",
-        help="是否使用adjoint方法, 默认是False",
-    )
-    parser.add_argument(
-        "--update_nn_params_epochs_every_round",
-        type=int,
-        default=2,
-        help="每轮更新神经网络参数的轮数, 默认是2",
-    )
+    parser.add_argument("--save_dir", type=str, default="./results/tumor/")
+    parser.add_argument("--data_dir", type=str, required=True)
+    parser.add_argument("--data_type", type=str, choices=["simulate", "real"], default="simulate")
+
+    # ✅ 这些参数要和 estimator.py 的 __init__ 对齐
+    parser.add_argument("--num_clusters", type=int, default=3)
+    parser.add_argument("--obs_dim", type=int, default=5)
+    parser.add_argument("--static_dim", type=int, default=3)
+    parser.add_argument("--hidden_dim", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--epochs", type=int, default=100)
+
+    # ✅ 真正生效的 batch_size（在 fit 里做梯度累积）
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--no_shuffle", action="store_true")
+
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
-    save_dir = Path(
-        args.save_dir.rstrip("/") + f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}/"
-    )
+    save_dir = Path(args.save_dir.rstrip("/") + f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}/")
 
     # --- 数据集加载 ---
     if args.data_type == "simulate":
         simu_data = SimulatedDataset.read_csv(data_dir)
 
-        with open(data_dir / "args.json", "r") as f:
-            simu_args = json.load(f)
-        max_t = simu_args["num_time_interval"][1] - 1
+        # ✅ 用数据本身最大时间归一化（对 tumor / linear / 真实数据都通用）
+        t_global_max = max(float(s.t.max()) for s in simu_data.samples if len(s.t) > 0)
 
-        def transform(x):
-            x["t"] = x["t"] / max_t
-            return x
+        def transform(item):
+            item["t"] = item["t"] / float(t_global_max + 1e-8)
+            return item
 
         dataset = SimulatedDatasetForTorch(simu_data, transform)
     else:
@@ -94,30 +48,28 @@ def main():
     # --- 模型训练 ---
     model = NODETrajectoryCluster(
         num_clusters=args.num_clusters,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        num_epochs=args.num_epochs,
-        bn=args.bn,
-        adjoint=args.adjoint,
-        update_nn_params_epochs_every_round=args.update_nn_params_epochs_every_round,
+        obs_dim=args.obs_dim,
+        static_dim=args.static_dim,
+        hidden_dim=args.hidden_dim,
+        lr=args.lr,
+        epochs=args.epochs,
     )
 
     model.fit(
         dataset,
-        time_key="t",
-        obs_key="x",
-        id_key="id",
-        label_key="y",
-        static_vars_key="z",
+        batch_size=args.batch_size,
+        shuffle=not args.no_shuffle,
     )
 
     # --- 结果保存 ---
     save_dir.mkdir(parents=True, exist_ok=True)
-    with open(save_dir / "args.json", "w") as f:
-        json.dump(vars(args), f)
+    with open(save_dir / "args.json", "w", encoding="utf-8") as f:
+        json.dump(vars(args), f, indent=2, ensure_ascii=False)
+
     model.save_model(save_dir / "model.pt")
     model.save_history(save_dir / "history.csv")
 
 
 if __name__ == "__main__":
     main()
+
