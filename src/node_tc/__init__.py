@@ -1,13 +1,5 @@
-from __future__ import annotations
+# src/node_tc/__init__.py
+from .estimator import NODETrajectoryCluster
 
-__all__ = ["NODETC", "NODETrajectoryCluster"]
-
-def __getattr__(name: str):
-    if name == "NODETC":
-        from .model import NODETC
-        return NODETC
-    if name == "NODETrajectoryCluster":
-        from .estimator import NODETrajectoryCluster
-        return NODETrajectoryCluster
-    raise AttributeError(f"module 'node_tc' has no attribute {name}")
+__all__ = ["NODETrajectoryCluster"]
 
