@@ -39,7 +39,8 @@ class SimulatedDataset:
 
     def __post_init__(self):
         self.true_k = np.array([p.true_cluster for p in self.samples], dtype=int)
-        self.num_clusters = len(set(self.true_k.tolist()))
+        # 修改处：移除 .tolist()，直接传入 ndarray
+        self.num_clusters = len(set(self.true_k))
 
         self.n_static_vars = 0
         for sample in self.samples:
@@ -117,7 +118,7 @@ class SimulatedDataset:
             ).to_csv(dir / "true_observations.csv")
 
     @classmethod
-    def read_csv(cls, dir: str | Path) -> "SimulatedDataset":
+    def read_csv(cls, dir: str | Path) -> SimulatedDataset:
         dir = Path(dir)
         df_meta = pd.read_csv(dir / "meta.csv", index_col=0)
         df_obs = pd.read_csv(dir / "observations.csv", index_col=0)
